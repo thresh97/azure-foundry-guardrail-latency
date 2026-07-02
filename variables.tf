@@ -3,6 +3,11 @@ variable "subscription_id" {
   description = "The target Azure subscription ID for deployment."
 }
 
+variable "prefix" {
+  type        = string
+  description = "Short identifier (e.g. username) used as a prefix in resource names and project names."
+}
+
 variable "location" {
   type        = string
   default     = "eastus2"

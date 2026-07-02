@@ -2,8 +2,9 @@
 #                  AZURE SUBSCRIPTION & LOCATION CONFIGURATION
 # ==============================================================================
 subscription_id             = "00000000-0000-0000-0000-000000000000"
-location                    = "eastus2"
-resource_group_name         = "rg-ai-foundry-benchmarks"
+location                    = "westus"
+prefix                      = "yourname"
+resource_group_name         = "rg-yourname-ai-foundry-benchmarks"
 
 # ==============================================================================
 #                     CORE SERVICES & SECURITY KEYS

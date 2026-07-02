@@ -4,57 +4,57 @@
 
 output "ai_services_endpoint" {
   value       = azurerm_cognitive_account.ai_services.endpoint
-  description = "The unified base endpoint URL for your Azure AI Services/Foundry account."
+  description = "Base endpoint for all model deployments."
 }
 
 output "ai_services_primary_key" {
   value       = azurerm_cognitive_account.ai_services.primary_access_key
   sensitive   = true
-  description = "The primary API key shared by all projects and model deployments for API header authentication."
+  description = "Primary API key shared by all deployments."
 }
 
 output "ai_services_secondary_key" {
   value       = azurerm_cognitive_account.ai_services.secondary_access_key
   sensitive   = true
-  description = "The fallback secondary API key."
+  description = "Secondary API key."
 }
 
 # ==============================================================================
-#                  PROJECT-SPECIFIC CONNECTION STRINGS
+#                  PROJECT ENDPOINTS (new Foundry architecture)
 # ==============================================================================
 
-output "project_default_connection_string" {
-  value       = "${var.location}.api.azureml.ms;${var.subscription_id};${var.resource_group_name};${azurerm_ai_foundry_project.project_default.name}"
-  description = "Pre-formatted connection string for the Default Safety Project (to use in python SDK)."
+output "project_default_endpoint" {
+  value       = "https://${var.cognitive_account_name}.services.ai.azure.com/api/projects/${azapi_resource.project_default.name}"
+  description = "New Foundry endpoint for the Default Safety project."
 }
 
-output "project_strict_connection_string" {
-  value       = "${var.location}.api.azureml.ms;${var.subscription_id};${var.resource_group_name};${azurerm_ai_foundry_project.project_strict.name}"
-  description = "Pre-formatted connection string for the Strict Azure Guardrails Project."
+output "project_strict_endpoint" {
+  value       = "https://${var.cognitive_account_name}.services.ai.azure.com/api/projects/${azapi_resource.project_strict.name}"
+  description = "New Foundry endpoint for the Strict Safety project."
 }
 
-output "project_prisma_connection_string" {
-  value       = "${var.location}.api.azureml.ms;${var.subscription_id};${var.resource_group_name};${azurerm_ai_foundry_project.project_prisma.name}"
-  description = "Pre-formatted connection string for the Prisma AIRS Gateway Project."
+output "project_prisma_endpoint" {
+  value       = "https://${var.cognitive_account_name}.services.ai.azure.com/api/projects/${azapi_resource.project_prisma.name}"
+  description = "New Foundry endpoint for the Prisma AIRS project."
 }
 
 # ==============================================================================
-#                     DEPLOYED MODEL ENGINES (TARGET NAMES)
+#                     MODEL DEPLOYMENT NAMES
 # ==============================================================================
 
 output "deployment_default_model_name" {
   value       = azurerm_cognitive_deployment.model_default.name
-  description = "Target deployment model string for benchmarking the baseline Microsoft.Default policy."
+  description = "Deployment name for the default RAI posture."
 }
 
 output "deployment_strict_model_name" {
   value       = azurerm_cognitive_deployment.model_strict.name
-  description = "Target deployment model string for benchmarking the strict custom Azure policy."
+  description = "Deployment name for the strict RAI posture."
 }
 
 output "deployment_prisma_model_name" {
   value       = azurerm_cognitive_deployment.model_prisma.name
-  description = "Target deployment model string for benchmarking the synchronous Prisma AIRS proxy policy."
+  description = "Deployment name for the Prisma RAI posture."
 }
 
 # ==============================================================================
@@ -68,7 +68,7 @@ output "bench_vm_public_ip" {
 
 output "bench_vm_ssh" {
   value       = "ssh azureuser@${azurerm_public_ip.bench_pip.ip_address}"
-  description = "Ready-to-run SSH command for the benchmark VM."
+  description = "SSH command for the benchmark VM."
 }
 
 output "bench_vm_run" {
