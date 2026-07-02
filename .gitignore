@@ -1,0 +1,23 @@
+# Terraform — state and secrets
+terraform.tfvars
+terraform.tfstate
+terraform.tfstate.backup
+.terraform/
+.terraform.lock.hcl
+*.tfplan
+
+# Benchmark — credentials and run artifacts
+.env
+embedding_bench_*.csv
+embedding_bench_*.summary.json
+guardrail_bench_*.csv
+guardrail_bench_*.summary.json
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Archives and scratch
+everything.tar.gz
+tmp/
