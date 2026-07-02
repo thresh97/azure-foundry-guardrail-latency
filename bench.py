@@ -1,24 +1,30 @@
 #!/usr/bin/env python3
-"""Three-way embedding latency benchmark across Azure AI RAI postures.
+"""Guardrail latency benchmark: three Azure RAI postures + optional Prisma AIRS direct API.
 
-Default, Strict, and Prisma-policy deployments of text-embedding-3-small are
-hit IN PARALLEL per prompt — one thread per endpoint — so each round is a true
-simultaneous head-to-head. Captures full client-side round-trip,
-server-side processing time (openai-processing-ms header), RAI verdicts, and
-request IDs into a long-format CSV, then emits a console summary + JSON with
-percentiles, pairwise deltas, and fastest-endpoint win rate.
+All scanners run IN PARALLEL per prompt for a true head-to-head. Captures full
+client-side round-trip, server-side processing time (openai-processing-ms header),
+RAI verdicts, and request IDs into a long-format CSV, then emits a console
+summary + JSON with percentiles, pairwise deltas, and fastest-endpoint win rate.
 
-Postures:
+Azure postures (always active):
   default   embedding-default-endpoint  (Microsoft.Default — system-managed)
   strict    embedding-strict-endpoint   (custom low-severity content filters)
   prisma    embedding-prisma-endpoint   (Prisma-policy RAI — medium thresholds)
 
+Prisma AIRS direct API (optional — added when env vars are present):
+  airs      POST /v1/scan/sync/request  (inline synchronous scan, no embedding)
+
 Required env / .env:
-  AZURE_AI_ENDPOINT      https://cs-foundry-benchmark-subdomain.cognitiveservices.azure.com/
-  AZURE_AI_API_KEY       <primary key from Terraform output>
-  DEPLOYMENT_DEFAULT     embedding-default-endpoint
-  DEPLOYMENT_STRICT      embedding-strict-endpoint
-  DEPLOYMENT_PRISMA      embedding-prisma-endpoint
+  AZURE_AI_ENDPOINT        https://<subdomain>.cognitiveservices.azure.com/
+  AZURE_AI_API_KEY         <primary key from: terraform output -raw ai_services_primary_key>
+  DEPLOYMENT_DEFAULT       embedding-default-endpoint
+  DEPLOYMENT_STRICT        embedding-strict-endpoint
+  DEPLOYMENT_PRISMA        embedding-prisma-endpoint
+
+Optional env (enables the airs leg):
+  PRISMA_AIRS_API_KEY      <x-pan-token>
+  PRISMA_AIRS_PROFILE_NAME <security profile name>
+  PRISMA_AIRS_ENDPOINT     https://service.api.aisecurity.paloaltonetworks.com  (default)
 """
 
 from __future__ import annotations
@@ -52,6 +58,7 @@ REQUIRED_ENV = (
     "DEPLOYMENT_STRICT",
     "DEPLOYMENT_PRISMA",
 )
+AIRS_DEFAULT_ENDPOINT = "https://service.api.aisecurity.paloaltonetworks.com"
 API_VERSION = "2024-02-01"
 VALID_SCAN_STATUSES = ("SUCCESS", "BLOCKED")
 
@@ -160,9 +167,88 @@ class EmbeddingScanner:
         )
 
 
+class AirsScanner:
+    """Hits the Prisma AIRS synchronous scan API directly (no Azure embedding).
+
+    HTTP 200 with action=block means the guardrail fired (BLOCKED).
+    vector_dims is always None — AIRS returns a verdict, not a vector.
+    """
+
+    def __init__(
+        self, name: str, base_url: str, api_key: str, profile: str, timeout: float
+    ) -> None:
+        self.name = name
+        self._profile = profile
+        self._url = base_url.rstrip("/") + "/v1/scan/sync/request"
+        self._http = httpx.Client(
+            timeout=timeout,
+            follow_redirects=True,
+            headers={
+                "x-pan-token": api_key,
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+        )
+
+    def warmup(self) -> None:
+        with contextlib.suppress(Exception):
+            self._http.post(self._url, json=self._payload("warmup", 0, 0))
+
+    def _payload(self, prompt: str, idx: int, rep: int) -> dict[str, Any]:
+        return {
+            "tr_id": f"bench-{idx}-{rep}",
+            "ai_profile": {"profile_name": self._profile},
+            "contents": [{"prompt": prompt}],
+        }
+
+    def scan(self, prompt: str, idx: int, rep: int) -> ScanResult:
+        http_status: int | None = None
+        status, error, request_id = "SUCCESS", "", ""
+        start = time.perf_counter()
+        try:
+            resp = self._http.post(self._url, json=self._payload(prompt, idx, rep))
+            latency = (time.perf_counter() - start) * 1000
+            http_status = resp.status_code
+            if resp.status_code == 200:
+                body = resp.json()
+                request_id = str(body.get("scan_id", ""))
+                if body.get("action") == "block":
+                    status = "BLOCKED"
+                    detected = sorted(
+                        k for k, v in body.get("prompt_detected", {}).items() if v
+                    )
+                    error = f"category={body.get('category')} detected={detected}"
+            else:
+                status = f"HTTP_{resp.status_code}"
+                error = " ".join(resp.text.split())[:500]
+        except httpx.TimeoutException:
+            latency = (time.perf_counter() - start) * 1000
+            status, error = "TIMEOUT", "no response within client timeout"
+        except httpx.HTTPError as e:
+            latency = (time.perf_counter() - start) * 1000
+            status, error = "CONN_ERROR", str(e).replace("\n", " ")
+
+        return ScanResult(
+            timestamp=datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+            prompt_index=idx,
+            repeat=rep,
+            endpoint=self.name,
+            latency_ms=round(latency, 2),
+            server_ms=None,
+            status=status,
+            http_status=http_status,
+            request_id=request_id,
+            region="",
+            vector_dims=None,
+            prompt_chars=len(prompt),
+            prompt=" ".join(prompt.split()),
+            error=error,
+        )
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Three-way embedding latency benchmark: default vs strict vs prisma RAI."
+        description="Guardrail latency benchmark: Azure embedding postures + optional Prisma AIRS direct API."
     )
     p.add_argument("-o", "--output", default=None,
                    help="CSV path (default: embedding_bench_<timestamp>.csv)")
@@ -322,7 +408,7 @@ def main() -> None:
     output = args.output or f"embedding_bench_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
     summary_path = os.path.splitext(output)[0] + ".summary.json"
 
-    scanners = [
+    scanners: list[EmbeddingScanner | AirsScanner] = [
         EmbeddingScanner("default", cfg["AZURE_AI_ENDPOINT"] or "", cfg["AZURE_AI_API_KEY"] or "",
                          cfg["DEPLOYMENT_DEFAULT"] or "", args.timeout),
         EmbeddingScanner("strict",  cfg["AZURE_AI_ENDPOINT"] or "", cfg["AZURE_AI_API_KEY"] or "",
@@ -330,11 +416,25 @@ def main() -> None:
         EmbeddingScanner("prisma",  cfg["AZURE_AI_ENDPOINT"] or "", cfg["AZURE_AI_API_KEY"] or "",
                          cfg["DEPLOYMENT_PRISMA"] or "",  args.timeout),
     ]
+    airs_key = os.getenv("PRISMA_AIRS_API_KEY")
+    airs_profile = os.getenv("PRISMA_AIRS_PROFILE_NAME")
+    if airs_key and airs_profile:
+        scanners.append(AirsScanner(
+            "airs",
+            os.getenv("PRISMA_AIRS_ENDPOINT", AIRS_DEFAULT_ENDPOINT),
+            airs_key,
+            airs_profile,
+            args.timeout,
+        ))
+        log.info("Prisma AIRS direct API enabled (profile: %s)", airs_profile)
+    else:
+        log.info("Prisma AIRS leg disabled — set PRISMA_AIRS_API_KEY + PRISMA_AIRS_PROFILE_NAME to enable")
+
     names = tuple(s.name for s in scanners)
 
     log.info(
         "Loaded %d prompts, sampled %d (seed=%s). "
-        "%d round(s) x %d postures = %d timed requests.",
+        "%d round(s) x %d legs = %d timed requests.",
         len(all_prompts), sample_size, args.seed,
         sample_size * args.repeat, len(scanners),
         sample_size * args.repeat * len(scanners),
@@ -343,7 +443,8 @@ def main() -> None:
 
     if not args.no_warmup:
         for scanner in scanners:
-            log.info("Warmup: %s (%s)", scanner.name, scanner._deployment)
+            label = getattr(scanner, "_deployment", getattr(scanner, "_url", ""))
+            log.info("Warmup: %s (%s)", scanner.name, label)
             scanner.warmup()
 
     run_started = datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -391,6 +492,8 @@ def main() -> None:
                         "strict": cfg["DEPLOYMENT_STRICT"],
                         "prisma": cfg["DEPLOYMENT_PRISMA"],
                     },
+                    "airs_profile": airs_profile,
+                    "legs": list(names),
                     "prompts_sampled": sample_size,
                     "repeat": args.repeat,
                     "seed": args.seed,
