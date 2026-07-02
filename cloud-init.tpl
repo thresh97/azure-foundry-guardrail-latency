@@ -18,6 +18,7 @@ write_files:
 
 runcmd:
   - git clone https://github.com/thresh97/azure-foundry-guardrail-latency /home/azureuser/bench
-  - mv /tmp/bench.env /home/azureuser/bench/.env
   - cd /home/azureuser/bench && python3 -m venv .venv && .venv/bin/pip install -q -r requirements.txt
+  - mv /tmp/bench.env /home/azureuser/bench/.env
   - chown -R azureuser:azureuser /home/azureuser/bench
+  - chmod 600 /home/azureuser/bench/.env
