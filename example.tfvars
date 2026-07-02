@@ -32,3 +32,15 @@ model_version               = "2024-05-13"
 # Use this model configuration to isolate network and proxy overhead without text generation latency.
 # model_name                  = "text-embedding-3-small"
 # model_version               = "1"
+
+# ==============================================================================
+#                  BENCHMARK VM — IN-REGION RUNNER
+# ==============================================================================
+# CIDRs allowed to SSH. Add your egress IP(s): curl -s ifconfig.me
+allowed_ssh_ips             = ["0.0.0.0/32"]   # REPLACE with your actual IP(s)
+
+# Your SSH public key: cat ~/.ssh/id_ed25519.pub
+vm_admin_ssh_public_key     = "ssh-ed25519 AAAA... user@host"
+
+# Optional: override VM size (default Standard_B2s = 2 vCPU / 4 GB)
+# vm_size                   = "Standard_B2s"

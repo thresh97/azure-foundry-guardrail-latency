@@ -56,3 +56,22 @@ output "deployment_prisma_model_name" {
   value       = azurerm_cognitive_deployment.model_prisma.name
   description = "Target deployment model string for benchmarking the synchronous Prisma AIRS proxy policy."
 }
+
+# ==============================================================================
+#                        BENCHMARK VM
+# ==============================================================================
+
+output "bench_vm_public_ip" {
+  value       = azurerm_public_ip.bench_pip.ip_address
+  description = "Public IP of the in-region benchmark VM."
+}
+
+output "bench_vm_ssh" {
+  value       = "ssh azureuser@${azurerm_public_ip.bench_pip.ip_address}"
+  description = "Ready-to-run SSH command for the benchmark VM."
+}
+
+output "bench_vm_run" {
+  value       = "ssh azureuser@${azurerm_public_ip.bench_pip.ip_address} 'cd bench && source .venv/bin/activate && python bench.py -n 20 -r 3 --seed 42'"
+  description = "One-liner to run the full benchmark remotely once .env is populated."
+}

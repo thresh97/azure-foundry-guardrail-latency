@@ -1,0 +1,23 @@
+#cloud-config
+packages:
+  - python3-venv
+  - git
+
+write_files:
+  - path: /tmp/bench.env
+    permissions: '0600'
+    owner: root:root
+    content: |
+      AZURE_AI_ENDPOINT=${ai_endpoint}
+      AZURE_AI_API_KEY=FILL_IN_RUN_terraform_output_-raw_ai_services_primary_key
+      DEPLOYMENT_DEFAULT=${deployment_default}
+      DEPLOYMENT_STRICT=${deployment_strict}
+      DEPLOYMENT_PRISMA=${deployment_prisma}
+      PRISMA_AIRS_API_KEY=FILL_IN
+      PRISMA_AIRS_PROFILE_NAME=ai-foundry-prisma-benchmark
+
+runcmd:
+  - git clone https://github.com/thresh97/azure-foundry-guardrail-latency /home/azureuser/bench
+  - mv /tmp/bench.env /home/azureuser/bench/.env
+  - cd /home/azureuser/bench && python3 -m venv .venv && .venv/bin/pip install -q -r requirements.txt
+  - chown -R azureuser:azureuser /home/azureuser/bench

@@ -292,3 +292,120 @@ resource "azurerm_cognitive_deployment" "model_prisma" {
     azapi_resource.prisma_policy
   ]
 }
+
+# ==============================================================================
+#           BENCHMARK VM — IN-REGION LATENCY MEASUREMENT (West US)
+# ==============================================================================
+
+resource "azurerm_virtual_network" "bench_vnet" {
+  name                = "vnet-bench-westus"
+  location            = azurerm_resource_group.rg.location
+  resource_group_name = azurerm_resource_group.rg.name
+  address_space       = ["10.10.0.0/24"]
+  tags                = var.tags
+}
+
+resource "azurerm_subnet" "bench_subnet" {
+  name                 = "snet-bench"
+  resource_group_name  = azurerm_resource_group.rg.name
+  virtual_network_name = azurerm_virtual_network.bench_vnet.name
+  address_prefixes     = ["10.10.0.0/27"]
+}
+
+resource "azurerm_public_ip" "bench_pip" {
+  name                = "pip-bench-vm"
+  location            = azurerm_resource_group.rg.location
+  resource_group_name = azurerm_resource_group.rg.name
+  allocation_method   = "Static"
+  sku                 = "Standard"
+  tags                = var.tags
+}
+
+resource "azurerm_network_security_group" "bench_nsg" {
+  name                = "nsg-bench-vm"
+  location            = azurerm_resource_group.rg.location
+  resource_group_name = azurerm_resource_group.rg.name
+
+  security_rule {
+    name                       = "AllowSSH"
+    priority                   = 100
+    direction                  = "Inbound"
+    access                     = "Allow"
+    protocol                   = "Tcp"
+    source_port_range          = "*"
+    destination_port_range     = "22"
+    source_address_prefixes    = var.allowed_ssh_ips
+    destination_address_prefix = "*"
+  }
+
+  security_rule {
+    name                       = "DenyAllInbound"
+    priority                   = 4096
+    direction                  = "Inbound"
+    access                     = "Deny"
+    protocol                   = "*"
+    source_port_range          = "*"
+    destination_port_range     = "*"
+    source_address_prefix      = "*"
+    destination_address_prefix = "*"
+  }
+
+  tags = var.tags
+}
+
+resource "azurerm_network_interface" "bench_nic" {
+  name                = "nic-bench-vm"
+  location            = azurerm_resource_group.rg.location
+  resource_group_name = azurerm_resource_group.rg.name
+
+  ip_configuration {
+    name                          = "ipconfig-bench"
+    subnet_id                     = azurerm_subnet.bench_subnet.id
+    private_ip_address_allocation = "Dynamic"
+    public_ip_address_id          = azurerm_public_ip.bench_pip.id
+  }
+
+  tags = var.tags
+}
+
+resource "azurerm_network_interface_security_group_association" "bench_nic_nsg" {
+  network_interface_id      = azurerm_network_interface.bench_nic.id
+  network_security_group_id = azurerm_network_security_group.bench_nsg.id
+}
+
+resource "azurerm_linux_virtual_machine" "bench_vm" {
+  name                            = "vm-bench-westus"
+  location                        = azurerm_resource_group.rg.location
+  resource_group_name             = azurerm_resource_group.rg.name
+  size                            = var.vm_size
+  admin_username                  = "azureuser"
+  disable_password_authentication = true
+  network_interface_ids           = [azurerm_network_interface.bench_nic.id]
+
+  admin_ssh_key {
+    username   = "azureuser"
+    public_key = var.vm_admin_ssh_public_key
+  }
+
+  os_disk {
+    caching              = "ReadWrite"
+    storage_account_type = "Standard_LRS"
+    disk_size_gb         = 30
+  }
+
+  source_image_reference {
+    publisher = "Canonical"
+    offer     = "ubuntu-24_04-lts"
+    sku       = "server"
+    version   = "latest"
+  }
+
+  custom_data = base64encode(templatefile("${path.module}/cloud-init.tpl", {
+    ai_endpoint        = azurerm_cognitive_account.ai_services.endpoint
+    deployment_default = azurerm_cognitive_deployment.model_default.name
+    deployment_strict  = azurerm_cognitive_deployment.model_strict.name
+    deployment_prisma  = azurerm_cognitive_deployment.model_prisma.name
+  }))
+
+  tags = var.tags
+}

@@ -78,3 +78,19 @@ variable "tags" {
   }
   description = "Common tags mapped across all resources."
 }
+
+variable "allowed_ssh_ips" {
+  type        = list(string)
+  description = "CIDR blocks permitted to SSH into the benchmark VM (e.g. [\"1.2.3.4/32\"])."
+}
+
+variable "vm_admin_ssh_public_key" {
+  type        = string
+  description = "SSH public key for the benchmark VM azureuser account."
+}
+
+variable "vm_size" {
+  type        = string
+  default     = "Standard_B2s"
+  description = "Azure VM SKU for the benchmark runner (2 vCPU / 4 GB is sufficient)."
+}
