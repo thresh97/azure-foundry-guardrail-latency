@@ -1,30 +1,30 @@
 #!/usr/bin/env python3
-"""Guardrail latency benchmark: three Azure RAI postures + optional Prisma AIRS direct API.
+"""Guardrail latency benchmark: three Azure AI Foundry guardrail postures + optional Prisma AIRS direct API.
 
 All scanners run IN PARALLEL per prompt for a true head-to-head. Captures full
 client-side round-trip, RAI verdicts, and request IDs into a long-format CSV,
 then emits a console summary + JSON with percentiles, pairwise deltas, and
 fastest-endpoint win rate.
 
-Azure postures (always active) — use Responses API via /openai/v1:
-  default   embedding-default-endpoint  (Microsoft.Default — system-managed)
-  strict    embedding-strict-endpoint   (custom low-severity content filters)
-  prisma    embedding-prisma-endpoint   (Prisma AIRS guardrail via AI Foundry)
+Azure postures (always active) — Responses API via /openai/v1:
+  default   azure-default  (Microsoft.Default RAI — system-managed)
+  strict    azure-strict   (custom low-severity content filters, prompt + completion)
+  prisma    prisma-airs    (Azure RAI pass-through + Prisma AIRS via Foundry integration)
 
-Prisma AIRS direct API (optional — enabled when PRISMA_AIRS_API_KEY is set):
-  airs      POST /v1/scan/sync/request  (inline synchronous scan, no generation)
+Prisma AIRS direct API (optional — enabled when PRISMA_AIRS_DIRECT_API_KEY is set):
+  airs      POST /v1/scan/sync/request  (scan only, no model call — latency baseline)
 
 Required env / .env:
   AZURE_AI_ENDPOINT        https://<subdomain>.services.ai.azure.com/openai/v1
-  AZURE_AI_API_KEY         <primary key from: terraform output -raw ai_services_primary_key>
-  DEPLOYMENT_DEFAULT       embedding-default-endpoint
-  DEPLOYMENT_STRICT        embedding-strict-endpoint
-  DEPLOYMENT_PRISMA        embedding-prisma-endpoint
+  DEPLOYMENT_DEFAULT       azure-default
+  DEPLOYMENT_STRICT        azure-strict
+  DEPLOYMENT_PRISMA        prisma-airs
 
-Optional env (enables the airs leg):
-  PRISMA_AIRS_API_KEY      <x-pan-token>
-  PRISMA_AIRS_PROFILE_NAME <security profile name>
-  PRISMA_AIRS_ENDPOINT     https://service.api.aisecurity.paloaltonetworks.com  (default)
+Optional env:
+  AZURE_AI_API_KEY              <api key> — omit to use DefaultAzureCredential (MSI / az login)
+  PRISMA_AIRS_DIRECT_API_KEY    <key>     — enables the airs leg
+  PRISMA_AIRS_DIRECT_PROFILE_NAME <name>
+  PRISMA_AIRS_ENDPOINT          https://service.api.aisecurity.paloaltonetworks.com (default)
 """
 
 from __future__ import annotations
@@ -161,7 +161,7 @@ class EmbeddingScanner:
 
 
 class AirsScanner:
-    """Hits the Prisma AIRS synchronous scan API directly (no Azure embedding).
+    """Hits the Prisma AIRS synchronous scan API directly (no Azure model call).
 
     HTTP 200 with action=block means the guardrail fired (BLOCKED).
     vector_dims is always None — AIRS returns a verdict, not a vector.
@@ -241,10 +241,10 @@ class AirsScanner:
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Guardrail latency benchmark: Azure embedding postures + optional Prisma AIRS direct API."
+        description="Guardrail latency benchmark: three Azure AI Foundry postures + optional Prisma AIRS direct API."
     )
     p.add_argument("-o", "--output", default=None,
-                   help="CSV path (default: embedding_bench_<timestamp>.csv)")
+                   help="CSV path (default: guardrail_bench_<timestamp>.csv)")
     p.add_argument("-n", "--num-prompts", type=int, default=10)
     p.add_argument("-p", "--prompts-file", default="prompts.txt")
     p.add_argument("-r", "--repeat", type=int, default=1,
@@ -434,7 +434,7 @@ def main() -> None:
     sample_size = min(args.num_prompts, len(all_prompts))
     prompts = random.sample(all_prompts, sample_size)
 
-    output = args.output or f"embedding_bench_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+    output = args.output or f"guardrail_bench_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
     summary_path = os.path.splitext(output)[0] + ".summary.json"
 
     scanners: list[EmbeddingScanner | AirsScanner] = [
@@ -515,7 +515,7 @@ def main() -> None:
             {
                 "run": {
                     "started_utc": run_started,
-                    "model": "text-embedding-3-small",
+                    "model": cfg["DEPLOYMENT_DEFAULT"],
                     "postures": {
                         "default": cfg["DEPLOYMENT_DEFAULT"],
                         "strict": cfg["DEPLOYMENT_STRICT"],
