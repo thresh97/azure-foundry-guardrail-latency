@@ -50,6 +50,21 @@ Project names get a shared random 3-char suffix on each apply to avoid Azure sof
 
 ---
 
+## Approximate Monthly Cost (idle)
+
+| Resource | SKU | ~$/month |
+|---|---|---|
+| Benchmark VM (`vm-bench-westus`) | Standard_B2s, West US | $30 |
+| Public IP (Standard Static) | — | $4 |
+| OS disk (30 GB Standard LRS) | — | $1 |
+| AI Services account + deployments | GlobalStandard, pay-per-token | $0 idle |
+| Key Vault | Standard | $0 idle |
+| **Total** | | **~$35/month** |
+
+The VM is the only meaningful cost. Destroy it when not benchmarking (`terraform destroy` or `terraform taint` + `apply` to rebuild fresh). The AI deployments and Key Vault carry no standing charge — you pay only when you run the bench.
+
+---
+
 ## Prerequisites
 
 ```bash
