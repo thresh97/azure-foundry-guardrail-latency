@@ -2,20 +2,20 @@
 """Guardrail latency benchmark: three Azure RAI postures + optional Prisma AIRS direct API.
 
 All scanners run IN PARALLEL per prompt for a true head-to-head. Captures full
-client-side round-trip, server-side processing time (openai-processing-ms header),
-RAI verdicts, and request IDs into a long-format CSV, then emits a console
-summary + JSON with percentiles, pairwise deltas, and fastest-endpoint win rate.
+client-side round-trip, RAI verdicts, and request IDs into a long-format CSV,
+then emits a console summary + JSON with percentiles, pairwise deltas, and
+fastest-endpoint win rate.
 
-Azure postures (always active):
+Azure postures (always active) — use Responses API via /openai/v1:
   default   embedding-default-endpoint  (Microsoft.Default — system-managed)
   strict    embedding-strict-endpoint   (custom low-severity content filters)
-  prisma    embedding-prisma-endpoint   (Prisma-policy RAI — medium thresholds)
+  prisma    embedding-prisma-endpoint   (Prisma AIRS guardrail via AI Foundry)
 
-Prisma AIRS direct API (optional — added when env vars are present):
-  airs      POST /v1/scan/sync/request  (inline synchronous scan, no embedding)
+Prisma AIRS direct API (optional — enabled when PRISMA_AIRS_API_KEY is set):
+  airs      POST /v1/scan/sync/request  (inline synchronous scan, no generation)
 
 Required env / .env:
-  AZURE_AI_ENDPOINT        https://<subdomain>.cognitiveservices.azure.com/
+  AZURE_AI_ENDPOINT        https://<subdomain>.services.ai.azure.com/openai/v1
   AZURE_AI_API_KEY         <primary key from: terraform output -raw ai_services_primary_key>
   DEPLOYMENT_DEFAULT       embedding-default-endpoint
   DEPLOYMENT_STRICT        embedding-strict-endpoint
@@ -43,23 +43,21 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, fields
 from datetime import datetime, timezone
 from itertools import combinations
-from typing import Any
+from typing import Any, Callable
 
 import httpx
 from dotenv import load_dotenv
-from openai import APIConnectionError, APIStatusError, APITimeoutError, AzureOpenAI
+from openai import APIConnectionError, APIStatusError, APITimeoutError, OpenAI
 
 log = logging.getLogger("bench")
 
 REQUIRED_ENV = (
     "AZURE_AI_ENDPOINT",
-    "AZURE_AI_API_KEY",
     "DEPLOYMENT_DEFAULT",
     "DEPLOYMENT_STRICT",
     "DEPLOYMENT_PRISMA",
 )
 AIRS_DEFAULT_ENDPOINT = "https://service.api.aisecurity.paloaltonetworks.com"
-API_VERSION = "2024-02-01"
 VALID_SCAN_STATUSES = ("SUCCESS", "BLOCKED")
 
 
@@ -82,51 +80,46 @@ class ScanResult:
 
 
 class EmbeddingScanner:
-    """Sends a text embedding request to one Azure AI deployment.
+    """Sends a request to one Azure AI Foundry deployment via the Responses API.
 
-    A content_filter 400 means the RAI policy fired (BLOCKED).
+    A content_filter error means the RAI policy or external guardrail fired (BLOCKED).
     Any other non-2xx is recorded as HTTP_<code>.
     """
 
     def __init__(
         self,
         name: str,
-        azure_endpoint: str,
+        endpoint: str,
         api_key: str,
         deployment: str,
         timeout: float,
     ) -> None:
         self.name = name
         self._deployment = deployment
-        self._client = AzureOpenAI(
-            azure_endpoint=azure_endpoint,
+        self._client = OpenAI(
+            base_url=endpoint,
             api_key=api_key,
-            api_version=API_VERSION,
             max_retries=0,
             timeout=httpx.Timeout(timeout),
         )
 
     def warmup(self) -> None:
         with contextlib.suppress(Exception):
-            self._client.embeddings.create(model=self._deployment, input="warmup")
+            self._client.responses.create(model=self._deployment, input="warmup")
 
     def scan(self, prompt: str, idx: int, rep: int) -> ScanResult:
         http_status: int | None = None
         server_ms: float | None = None
-        vector_dims: int | None = None
         status, error = "SUCCESS", ""
         headers = httpx.Headers()
         start = time.perf_counter()
         try:
-            raw = self._client.embeddings.with_raw_response.create(
+            raw = self._client.responses.with_raw_response.create(
                 model=self._deployment, input=prompt
             )
             latency = (time.perf_counter() - start) * 1000
             http_status = raw.status_code
             headers = raw.headers
-            body = raw.parse()
-            if body.data:
-                vector_dims = len(body.data[0].embedding)
         except APIStatusError as e:
             latency = (time.perf_counter() - start) * 1000
             http_status = e.status_code
@@ -160,7 +153,7 @@ class EmbeddingScanner:
             request_id=headers.get("apim-request-id")
             or headers.get("x-request-id", ""),
             region=headers.get("x-ms-region", ""),
-            vector_dims=vector_dims,
+            vector_dims=None,
             prompt_chars=len(prompt),
             prompt=" ".join(prompt.split()),
             error=error,
@@ -387,6 +380,40 @@ def print_summary(summary: dict[str, Any], names: tuple[str, ...]) -> None:
         )
 
 
+def resolve_azure_auth() -> str | Any:
+    """Return an api_key value for OpenAI(base_url=..., api_key=...).
+
+    Priority:
+      1. AZURE_AI_API_KEY in env  → returned as a plain string.
+      2. Managed Identity         → token provider callable (Azure VM with SAI/UAI).
+      3. Azure CLI (az login)     → token provider callable (developer laptop).
+
+    The chosen method is logged at startup so it's always visible.
+    """
+    api_key = os.getenv("AZURE_AI_API_KEY")
+    if api_key:
+        log.info("Azure auth: API key (AZURE_AI_API_KEY)")
+        return api_key
+
+    try:
+        from azure.identity import DefaultAzureCredential, ManagedIdentityCredential, get_bearer_token_provider
+    except ImportError:
+        log.error("No AZURE_AI_API_KEY set and azure-identity is not installed. "
+                  "pip install azure-identity  or set AZURE_AI_API_KEY.")
+        sys.exit(1)
+
+    # Detect likely sub-credential for a clear startup message.
+    if os.getenv("IDENTITY_ENDPOINT"):
+        method = "ManagedIdentityCredential (VM instance identity)"
+    elif any(os.getenv(v) for v in ("AZURE_CLIENT_ID", "AZURE_CLIENT_SECRET", "AZURE_TENANT_ID")):
+        method = "EnvironmentCredential (service principal env vars)"
+    else:
+        method = "AzureCliCredential (az login)"
+
+    log.info("Azure auth: DefaultAzureCredential → %s", method)
+    return get_bearer_token_provider(DefaultAzureCredential(), "https://ai.azure.com/.default")
+
+
 def main() -> None:
     args = parse_args()
     load_dotenv()
@@ -399,6 +426,8 @@ def main() -> None:
         log.error("Missing required env vars: %s", ", ".join(missing))
         sys.exit(1)
 
+    azure_auth = resolve_azure_auth()
+
     all_prompts = load_prompts(args.prompts_file)
     if args.seed is not None:
         random.seed(args.seed)
@@ -409,15 +438,15 @@ def main() -> None:
     summary_path = os.path.splitext(output)[0] + ".summary.json"
 
     scanners: list[EmbeddingScanner | AirsScanner] = [
-        EmbeddingScanner("default", cfg["AZURE_AI_ENDPOINT"] or "", cfg["AZURE_AI_API_KEY"] or "",
+        EmbeddingScanner("default", cfg["AZURE_AI_ENDPOINT"] or "", azure_auth,
                          cfg["DEPLOYMENT_DEFAULT"] or "", args.timeout),
-        EmbeddingScanner("strict",  cfg["AZURE_AI_ENDPOINT"] or "", cfg["AZURE_AI_API_KEY"] or "",
+        EmbeddingScanner("strict",  cfg["AZURE_AI_ENDPOINT"] or "", azure_auth,
                          cfg["DEPLOYMENT_STRICT"] or "",  args.timeout),
-        EmbeddingScanner("prisma",  cfg["AZURE_AI_ENDPOINT"] or "", cfg["AZURE_AI_API_KEY"] or "",
+        EmbeddingScanner("prisma",  cfg["AZURE_AI_ENDPOINT"] or "", azure_auth,
                          cfg["DEPLOYMENT_PRISMA"] or "",  args.timeout),
     ]
-    airs_key = os.getenv("PRISMA_AIRS_API_KEY")
-    airs_profile = os.getenv("PRISMA_AIRS_PROFILE_NAME")
+    airs_key = os.getenv("PRISMA_AIRS_DIRECT_API_KEY") or os.getenv("PRISMA_AIRS_API_KEY")
+    airs_profile = os.getenv("PRISMA_AIRS_DIRECT_PROFILE_NAME") or os.getenv("PRISMA_AIRS_PROFILE_NAME")
     if airs_key and airs_profile:
         scanners.append(AirsScanner(
             "airs",
@@ -428,7 +457,7 @@ def main() -> None:
         ))
         log.info("Prisma AIRS direct API enabled (profile: %s)", airs_profile)
     else:
-        log.info("Prisma AIRS leg disabled — set PRISMA_AIRS_API_KEY + PRISMA_AIRS_PROFILE_NAME to enable")
+        log.info("Prisma AIRS leg disabled — set PRISMA_AIRS_DIRECT_API_KEY + PRISMA_AIRS_DIRECT_PROFILE_NAME to enable")
 
     names = tuple(s.name for s in scanners)
 

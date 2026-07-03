@@ -32,14 +32,35 @@ resource "azurerm_key_vault" "kv" {
 # 5. Deployer Key Vault Access
 resource "azurerm_role_assignment" "deployer_kv_admin" {
   scope                = azurerm_key_vault.kv.id
-  role_definition_name = "Key Vault Secrets Officer"
+  role_definition_name = "Key Vault Administrator"
   principal_id         = data.azurerm_client_config.current.object_id
 }
 
-# 6. Managed Identity Key Vault Read Access
+# 6. Managed Identity Key Vault Access
 resource "azurerm_role_assignment" "identity_kv_reader" {
   scope                = azurerm_key_vault.kv.id
-  role_definition_name = "Key Vault Secrets User"
+  role_definition_name = "Key Vault Administrator"
+  principal_id         = azurerm_user_assigned_identity.ai_identity.principal_id
+}
+
+# 6b. AI Services system-assigned identity Key Vault Access
+resource "azurerm_role_assignment" "ai_services_kv_admin" {
+  scope                = azurerm_key_vault.kv.id
+  role_definition_name = "Key Vault Administrator"
+  principal_id         = azurerm_cognitive_account.ai_services.identity[0].principal_id
+}
+
+# 6c. Deployer Foundry User on the resource group (required for portal guardrail assignment)
+resource "azurerm_role_assignment" "deployer_foundry_user" {
+  scope                = azurerm_resource_group.rg.id
+  role_definition_name = "Foundry User"
+  principal_id         = data.azurerm_client_config.current.object_id
+}
+
+# 6d. Managed identity Azure AI Developer on AI Services account (makes MI visible in Foundry portal guardrail MI dropdown)
+resource "azurerm_role_assignment" "identity_ai_developer" {
+  scope                = azurerm_cognitive_account.ai_services.id
+  role_definition_name = "Azure AI Developer"
   principal_id         = azurerm_user_assigned_identity.ai_identity.principal_id
 }
 
@@ -57,32 +78,21 @@ resource "azurerm_key_vault_secret" "prisma_api_key" {
 
 # 8. AI Services Account
 resource "azurerm_cognitive_account" "ai_services" {
-  name                  = var.cognitive_account_name
-  location              = azurerm_resource_group.rg.location
-  resource_group_name   = azurerm_resource_group.rg.name
-  kind                  = "AIServices"
-  sku_name              = "S0"
-  custom_subdomain_name = var.custom_subdomain_name
+  name                          = var.cognitive_account_name
+  location                      = azurerm_resource_group.rg.location
+  resource_group_name           = azurerm_resource_group.rg.name
+  kind                          = "AIServices"
+  sku_name                      = "S0"
+  custom_subdomain_name         = var.custom_subdomain_name
   public_network_access_enabled = true
+  project_management_enabled    = true
 
   identity {
-    type         = "UserAssigned"
+    type         = "SystemAssigned, UserAssigned"
     identity_ids = [azurerm_user_assigned_identity.ai_identity.id]
   }
 
   tags = var.tags
-}
-
-# 8b. Enable project management — required for new Foundry project type
-resource "azapi_update_resource" "ai_services_project_mgmt" {
-  type        = "Microsoft.CognitiveServices/accounts@2025-06-01"
-  resource_id = azurerm_cognitive_account.ai_services.id
-
-  body = {
-    properties = {
-      allowProjectManagement = true
-    }
-  }
 }
 
 # Shared suffix — same 3 chars across all three projects; changes on each destroy/apply
@@ -107,7 +117,7 @@ resource "azapi_resource" "project_default" {
   schema_validation_enabled = false
 
   identity {
-    type         = "UserAssigned"
+    type         = "SystemAssigned, UserAssigned"
     identity_ids = [azurerm_user_assigned_identity.ai_identity.id]
   }
 
@@ -117,7 +127,7 @@ resource "azapi_resource" "project_default" {
     }
   }
 
-  depends_on = [azapi_update_resource.ai_services_project_mgmt]
+  depends_on = [azurerm_cognitive_account.ai_services]
 }
 
 # Project 2: Strict Azure Content Filters
@@ -129,7 +139,7 @@ resource "azapi_resource" "project_strict" {
   schema_validation_enabled = false
 
   identity {
-    type         = "UserAssigned"
+    type         = "SystemAssigned, UserAssigned"
     identity_ids = [azurerm_user_assigned_identity.ai_identity.id]
   }
 
@@ -139,7 +149,7 @@ resource "azapi_resource" "project_strict" {
     }
   }
 
-  depends_on = [azapi_update_resource.ai_services_project_mgmt]
+  depends_on = [azurerm_cognitive_account.ai_services]
 }
 
 # Project 3: Prisma AIRS External Guardrail
@@ -151,7 +161,7 @@ resource "azapi_resource" "project_prisma" {
   schema_validation_enabled = false
 
   identity {
-    type         = "UserAssigned"
+    type         = "SystemAssigned, UserAssigned"
     identity_ids = [azurerm_user_assigned_identity.ai_identity.id]
   }
 
@@ -161,7 +171,7 @@ resource "azapi_resource" "project_prisma" {
     }
   }
 
-  depends_on = [azapi_update_resource.ai_services_project_mgmt]
+  depends_on = [azurerm_cognitive_account.ai_services]
 }
 
 # ==============================================================================
@@ -174,6 +184,12 @@ resource "azapi_resource" "strict_policy" {
   name      = "strict-azure-safety-policy"
   parent_id = azurerm_cognitive_account.ai_services.id
 
+  depends_on = [
+    azapi_resource.project_default,
+    azapi_resource.project_strict,
+    azapi_resource.project_prisma,
+  ]
+
   body = {
     properties = {
       basePolicyName = "Microsoft.Default"
@@ -182,37 +198,40 @@ resource "azapi_resource" "strict_policy" {
         { name = "Hate",      severityThreshold = "Low",  blocking = true, enabled = true, source = "Prompt" },
         { name = "Violence",  severityThreshold = "Low",  blocking = true, enabled = true, source = "Prompt" },
         { name = "Sexual",    severityThreshold = "Low",  blocking = true, enabled = true, source = "Prompt" },
-        { name = "SelfHarm",  severityThreshold = "Low",  blocking = true, enabled = true, source = "Prompt" },
+        { name = "Selfharm",  severityThreshold = "Low",  blocking = true, enabled = true, source = "Prompt" },
         { name = "Jailbreak", severityThreshold = "High", blocking = true, enabled = true, source = "Prompt" },
         { name = "Hate",      severityThreshold = "Low",  blocking = true, enabled = true, source = "Completion" },
         { name = "Violence",  severityThreshold = "Low",  blocking = true, enabled = true, source = "Completion" },
         { name = "Sexual",    severityThreshold = "Low",  blocking = true, enabled = true, source = "Completion" },
-        { name = "SelfHarm",  severityThreshold = "Low",  blocking = true, enabled = true, source = "Completion" }
+        { name = "Selfharm",  severityThreshold = "Low",  blocking = true, enabled = true, source = "Completion" }
       ]
     }
   }
 }
 
-# Prisma: standard Azure policy — Prisma registration done via new Foundry portal post-apply
+# Prisma: pass-through Azure filters (action=NONE), Prisma registration done via new Foundry portal post-apply
 resource "azapi_resource" "prisma_policy" {
-  type      = "Microsoft.CognitiveServices/accounts/raiPolicies@2024-10-01"
-  name      = "prisma-airs-safety-policy"
-  parent_id = azurerm_cognitive_account.ai_services.id
+  type                      = "Microsoft.CognitiveServices/accounts/raiPolicies@2024-10-01"
+  name                      = "prisma-airs-safety-policy"
+  parent_id                 = azurerm_cognitive_account.ai_services.id
+  schema_validation_enabled = false
+
+  depends_on = [azapi_resource.strict_policy]
 
   body = {
     properties = {
-      basePolicyName = "Microsoft.Default"
-      mode           = "Blocking"
+      basePolicyName = "Microsoft.DefaultV2"
+      mode           = "Default"
       contentFilters = [
-        { name = "Hate",      severityThreshold = "Medium", blocking = true, enabled = true, source = "Prompt" },
-        { name = "Violence",  severityThreshold = "Medium", blocking = true, enabled = true, source = "Prompt" },
-        { name = "Sexual",    severityThreshold = "Medium", blocking = true, enabled = true, source = "Prompt" },
-        { name = "SelfHarm",  severityThreshold = "Medium", blocking = true, enabled = true, source = "Prompt" },
-        { name = "Jailbreak", severityThreshold = "High",   blocking = true, enabled = true, source = "Prompt" },
-        { name = "Hate",      severityThreshold = "Medium", blocking = true, enabled = true, source = "Completion" },
-        { name = "Violence",  severityThreshold = "Medium", blocking = true, enabled = true, source = "Completion" },
-        { name = "Sexual",    severityThreshold = "Medium", blocking = true, enabled = true, source = "Completion" },
-        { name = "SelfHarm",  severityThreshold = "Medium", blocking = true, enabled = true, source = "Completion" }
+        { name = "Hate",      action = "NONE", severityThreshold = "Medium", blocking = true, enabled = true, source = "Prompt" },
+        { name = "Violence",  action = "NONE", severityThreshold = "Medium", blocking = true, enabled = true, source = "Prompt" },
+        { name = "Sexual",    action = "NONE", severityThreshold = "Medium", blocking = true, enabled = true, source = "Prompt" },
+        { name = "Selfharm",  action = "NONE", severityThreshold = "Medium", blocking = true, enabled = true, source = "Prompt" },
+        { name = "Jailbreak", action = "NONE", severityThreshold = "High",   blocking = true, enabled = true, source = "Prompt" },
+        { name = "Hate",      action = "NONE", severityThreshold = "Medium", blocking = true, enabled = true, source = "Completion" },
+        { name = "Violence",  action = "NONE", severityThreshold = "Medium", blocking = true, enabled = true, source = "Completion" },
+        { name = "Sexual",    action = "NONE", severityThreshold = "Medium", blocking = true, enabled = true, source = "Completion" },
+        { name = "Selfharm",  action = "NONE", severityThreshold = "Medium", blocking = true, enabled = true, source = "Completion" }
       ]
     }
   }
@@ -223,7 +242,7 @@ resource "azapi_resource" "prisma_policy" {
 # ==============================================================================
 
 resource "azurerm_cognitive_deployment" "model_default" {
-  name                 = "embedding-default-endpoint"
+  name                 = "azure-default"
   cognitive_account_id = azurerm_cognitive_account.ai_services.id
 
   model {
@@ -233,13 +252,15 @@ resource "azurerm_cognitive_deployment" "model_default" {
   }
 
   sku {
-    name     = "Standard"
-    capacity = 10
+    name     = "GlobalStandard"
+    capacity = 1000
   }
+
+  depends_on = [azapi_resource.prisma_policy]
 }
 
 resource "azurerm_cognitive_deployment" "model_strict" {
-  name                 = "embedding-strict-endpoint"
+  name                 = "azure-strict"
   cognitive_account_id = azurerm_cognitive_account.ai_services.id
   rai_policy_name      = "strict-azure-safety-policy"
 
@@ -250,15 +271,15 @@ resource "azurerm_cognitive_deployment" "model_strict" {
   }
 
   sku {
-    name     = "Standard"
-    capacity = 10
+    name     = "GlobalStandard"
+    capacity = 1000
   }
 
   depends_on = [azapi_resource.strict_policy]
 }
 
 resource "azurerm_cognitive_deployment" "model_prisma" {
-  name                 = "embedding-prisma-endpoint"
+  name                 = "prisma-airs"
   cognitive_account_id = azurerm_cognitive_account.ai_services.id
   rai_policy_name      = "prisma-airs-safety-policy"
 
@@ -269,8 +290,8 @@ resource "azurerm_cognitive_deployment" "model_prisma" {
   }
 
   sku {
-    name     = "Standard"
-    capacity = 10
+    name     = "GlobalStandard"
+    capacity = 1000
   }
 
   depends_on = [azapi_resource.prisma_policy]
@@ -383,12 +404,24 @@ resource "azurerm_linux_virtual_machine" "bench_vm" {
     version   = "latest"
   }
 
+  identity {
+    type = "SystemAssigned"
+  }
+
   custom_data = base64encode(templatefile("${path.module}/cloud-init.tpl", {
-    ai_endpoint        = azurerm_cognitive_account.ai_services.endpoint
-    deployment_default = azurerm_cognitive_deployment.model_default.name
-    deployment_strict  = azurerm_cognitive_deployment.model_strict.name
-    deployment_prisma  = azurerm_cognitive_deployment.model_prisma.name
+    ai_endpoint                = "https://${var.custom_subdomain_name}.services.ai.azure.com/openai/v1"
+    deployment_default         = azurerm_cognitive_deployment.model_default.name
+    deployment_strict          = azurerm_cognitive_deployment.model_strict.name
+    deployment_prisma          = azurerm_cognitive_deployment.model_prisma.name
+    prisma_airs_api_key        = var.prisma_airs_api_key_value
+    prisma_airs_direct_api_key = var.prisma_airs_direct_api_key_value
   }))
 
   tags = var.tags
+}
+
+resource "azurerm_role_assignment" "bench_vm_ai_user" {
+  scope                = azurerm_cognitive_account.ai_services.id
+  role_definition_name = "Cognitive Services OpenAI User"
+  principal_id         = azurerm_linux_virtual_machine.bench_vm.identity[0].principal_id
 }

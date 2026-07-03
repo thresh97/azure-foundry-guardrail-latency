@@ -9,12 +9,13 @@ write_files:
     owner: root:root
     content: |
       AZURE_AI_ENDPOINT=${ai_endpoint}
-      AZURE_AI_API_KEY=FILL_IN_RUN_terraform_output_-raw_ai_services_primary_key
       DEPLOYMENT_DEFAULT=${deployment_default}
       DEPLOYMENT_STRICT=${deployment_strict}
       DEPLOYMENT_PRISMA=${deployment_prisma}
-      PRISMA_AIRS_API_KEY=FILL_IN
+      PRISMA_AIRS_API_KEY=${prisma_airs_api_key}
       PRISMA_AIRS_PROFILE_NAME=ai-foundry-prisma-benchmark
+      PRISMA_AIRS_DIRECT_API_KEY=${prisma_airs_direct_api_key}
+      PRISMA_AIRS_DIRECT_PROFILE_NAME=bench-direct-api
 
 runcmd:
   - git clone https://github.com/thresh97/azure-foundry-guardrail-latency /home/azureuser/bench

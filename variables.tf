@@ -53,7 +53,13 @@ variable "key_vault_name" {
 variable "prisma_airs_api_key_value" {
   type        = string
   sensitive   = true
-  description = "Secret API key string used to connect to Palo Alto Networks Prisma AIRS scanner endpoint."
+  description = "Prisma AIRS API key used by the Azure Foundry guardrail integration (stored in Key Vault)."
+}
+
+variable "prisma_airs_direct_api_key_value" {
+  type        = string
+  sensitive   = true
+  description = "Separate Prisma AIRS API key for the direct bench leg — differentiates from Foundry calls in AIRS session logs."
 }
 
 variable "prisma_airs_url" {
