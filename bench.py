@@ -1,18 +1,20 @@
 #!/usr/bin/env python3
-"""Guardrail latency benchmark: three Azure AI Foundry guardrail postures + optional Prisma AIRS direct API.
+"""Guardrail latency benchmark: Azure AI Foundry guardrail postures + optional extra legs.
 
 All scanners run IN PARALLEL per prompt for a true head-to-head. Captures full
 client-side round-trip, RAI verdicts, and request IDs into a long-format CSV,
 then emits a console summary + JSON with percentiles, pairwise deltas, and
 fastest-endpoint win rate.
 
-Azure postures (always active) — Responses API via /openai/v1:
+Azure Foundry postures (always active) — Responses API via /openai/v1:
   default   azure-default  (Microsoft.Default RAI — system-managed)
   strict    azure-strict   (custom low-severity content filters, prompt + completion)
   prisma    prisma-airs    (Azure RAI pass-through + Prisma AIRS via Foundry integration)
 
-Prisma AIRS direct API (optional — enabled when PRISMA_AIRS_DIRECT_API_KEY is set):
-  airs      POST /v1/scan/sync/request  (scan only, no model call — latency baseline)
+Optional standalone scanner legs (scan-only, no model generation):
+  content   Azure AI Content Safety — shieldPrompt (jailbreak / prompt injection)
+  security  Azure AI Content Safety — text:analyze  (hate, violence, self-harm, sexual)
+  airs      Prisma AIRS             — POST /v1/scan/sync/request
 
 Required env / .env:
   AZURE_AI_ENDPOINT        https://<subdomain>.services.ai.azure.com/openai/v1
@@ -21,10 +23,12 @@ Required env / .env:
   DEPLOYMENT_PRISMA        prisma-airs
 
 Optional env:
-  AZURE_AI_API_KEY              <api key> — omit to use DefaultAzureCredential (MSI / az login)
-  PRISMA_AIRS_DIRECT_API_KEY    <key>     — enables the airs leg
-  PRISMA_AIRS_DIRECT_PROFILE_NAME <name>
-  PRISMA_AIRS_ENDPOINT          https://service.api.aisecurity.paloaltonetworks.com (default)
+  AZURE_AI_API_KEY                  <api key> — omit to use DefaultAzureCredential (MSI / az login)
+  AZURE_CONTENT_SAFETY_ENDPOINT     <base url e.g. https://<name>.cognitiveservices.azure.com>
+                                    enables both content (shieldPrompt) and security (text:analyze) legs
+  PRISMA_AIRS_DIRECT_API_KEY        <key>     — enables the airs leg
+  PRISMA_AIRS_DIRECT_PROFILE_NAME   <name>
+  PRISMA_AIRS_ENDPOINT              https://service.api.aisecurity.paloaltonetworks.com (default)
 """
 
 from __future__ import annotations
@@ -103,6 +107,18 @@ class EmbeddingScanner:
             timeout=httpx.Timeout(timeout),
         )
 
+    def probe(self) -> tuple[bool, str]:
+        try:
+            self._client.responses.create(model=self._deployment, input="probe")
+            return True, "ok"
+        except APIStatusError as e:
+            # 4xx from the model/guardrail means the endpoint is reachable
+            if "content_filter" in (e.response.text or ""):
+                return True, "ok (content_filter on probe prompt)"
+            return True, f"ok (HTTP {e.status_code})"
+        except (APITimeoutError, APIConnectionError) as e:
+            return False, str(e).replace("\n", " ")[:200]
+
     def warmup(self) -> None:
         with contextlib.suppress(Exception):
             self._client.responses.create(model=self._deployment, input="warmup")
@@ -160,6 +176,152 @@ class EmbeddingScanner:
         )
 
 
+class ContentShieldScanner:
+    """Azure AI Content Safety — shieldPrompt API (jailbreak / prompt-injection detection).
+
+    POST /contentsafety/text:shieldPrompt?api-version=2024-09-01
+    BLOCKED when userPromptAnalysis.attackDetected is true. Scan-only, no model generation.
+    """
+
+    _API_PATH = "/contentsafety/text:shieldPrompt?api-version=2024-09-01"
+
+    def __init__(self, name: str, base_url: str, api_key: str | None,
+                 token_provider: Any | None, timeout: float) -> None:
+        self.name = name
+        self._url = base_url.rstrip("/") + self._API_PATH
+        self._api_key = api_key
+        self._token_provider = token_provider
+        self._http = httpx.Client(timeout=timeout, follow_redirects=True)
+
+    def _auth_headers(self) -> dict[str, str]:
+        if self._api_key:
+            return {"Ocp-Apim-Subscription-Key": self._api_key, "Content-Type": "application/json"}
+        token = self._token_provider()
+        return {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+
+    def probe(self) -> tuple[bool, str]:
+        try:
+            resp = self._http.post(self._url, headers=self._auth_headers(), json={"userPrompt": "probe"})
+            if resp.status_code in (200, 400):
+                return True, f"ok (HTTP {resp.status_code})"
+            return False, f"HTTP {resp.status_code}: {resp.text[:200]}"
+        except httpx.TimeoutException:
+            return False, "timeout"
+        except httpx.HTTPError as e:
+            return False, str(e).replace("\n", " ")[:200]
+
+    def warmup(self) -> None:
+        with contextlib.suppress(Exception):
+            self._http.post(self._url, headers=self._auth_headers(), json={"userPrompt": "warmup"})
+
+    def scan(self, prompt: str, idx: int, rep: int) -> ScanResult:
+        http_status: int | None = None
+        status, error, request_id = "SUCCESS", "", ""
+        start = time.perf_counter()
+        try:
+            resp = self._http.post(self._url, headers=self._auth_headers(), json={"userPrompt": prompt})
+            latency = (time.perf_counter() - start) * 1000
+            http_status = resp.status_code
+            request_id = resp.headers.get("x-request-id", "")
+            if resp.status_code == 200:
+                if resp.json().get("userPromptAnalysis", {}).get("attackDetected"):
+                    status = "BLOCKED"
+                    error = "attackDetected=true"
+            else:
+                status = f"HTTP_{resp.status_code}"
+                error = " ".join(resp.text.split())[:500]
+        except httpx.TimeoutException:
+            latency = (time.perf_counter() - start) * 1000
+            status, error = "TIMEOUT", "no response within client timeout"
+        except httpx.HTTPError as e:
+            latency = (time.perf_counter() - start) * 1000
+            status, error = "CONN_ERROR", str(e).replace("\n", " ")
+        return ScanResult(
+            timestamp=datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+            prompt_index=idx, repeat=rep, endpoint=self.name,
+            latency_ms=round(latency, 2), server_ms=None, status=status,
+            http_status=http_status, request_id=request_id, region="",
+            vector_dims=None, prompt_chars=len(prompt),
+            prompt=" ".join(prompt.split()), error=error,
+        )
+
+
+class TextAnalyzeScanner:
+    """Azure AI Content Safety — text:analyze API (harmful content detection).
+
+    POST /contentsafety/text:analyze?api-version=2024-09-01
+    BLOCKED when any category (Hate, SelfHarm, Sexual, Violence) has severity > 0.
+    Scan-only, no model generation.
+    """
+
+    _API_PATH = "/contentsafety/text:analyze?api-version=2024-09-01"
+    _CATEGORIES = ["Hate", "SelfHarm", "Sexual", "Violence"]
+
+    def __init__(self, name: str, base_url: str, api_key: str | None,
+                 token_provider: Any | None, timeout: float) -> None:
+        self.name = name
+        self._url = base_url.rstrip("/") + self._API_PATH
+        self._api_key = api_key
+        self._token_provider = token_provider
+        self._http = httpx.Client(timeout=timeout, follow_redirects=True)
+
+    def _auth_headers(self) -> dict[str, str]:
+        if self._api_key:
+            return {"Ocp-Apim-Subscription-Key": self._api_key, "Content-Type": "application/json"}
+        token = self._token_provider()
+        return {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+
+    def _body(self, prompt: str) -> dict[str, Any]:
+        return {"text": prompt, "categories": self._CATEGORIES, "outputType": "FourSeverityLevels"}
+
+    def probe(self) -> tuple[bool, str]:
+        try:
+            resp = self._http.post(self._url, headers=self._auth_headers(), json=self._body("probe"))
+            if resp.status_code in (200, 400):
+                return True, f"ok (HTTP {resp.status_code})"
+            return False, f"HTTP {resp.status_code}: {resp.text[:200]}"
+        except httpx.TimeoutException:
+            return False, "timeout"
+        except httpx.HTTPError as e:
+            return False, str(e).replace("\n", " ")[:200]
+
+    def warmup(self) -> None:
+        with contextlib.suppress(Exception):
+            self._http.post(self._url, headers=self._auth_headers(), json=self._body("warmup"))
+
+    def scan(self, prompt: str, idx: int, rep: int) -> ScanResult:
+        http_status: int | None = None
+        status, error, request_id = "SUCCESS", "", ""
+        start = time.perf_counter()
+        try:
+            resp = self._http.post(self._url, headers=self._auth_headers(), json=self._body(prompt))
+            latency = (time.perf_counter() - start) * 1000
+            http_status = resp.status_code
+            request_id = resp.headers.get("x-request-id", "")
+            if resp.status_code == 200:
+                flagged = [c for c in resp.json().get("categoriesAnalysis", []) if c.get("severity", 0) > 0]
+                if flagged:
+                    status = "BLOCKED"
+                    error = "flagged=" + ",".join(f"{c['category']}:{c['severity']}" for c in flagged)
+            else:
+                status = f"HTTP_{resp.status_code}"
+                error = " ".join(resp.text.split())[:500]
+        except httpx.TimeoutException:
+            latency = (time.perf_counter() - start) * 1000
+            status, error = "TIMEOUT", "no response within client timeout"
+        except httpx.HTTPError as e:
+            latency = (time.perf_counter() - start) * 1000
+            status, error = "CONN_ERROR", str(e).replace("\n", " ")
+        return ScanResult(
+            timestamp=datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+            prompt_index=idx, repeat=rep, endpoint=self.name,
+            latency_ms=round(latency, 2), server_ms=None, status=status,
+            http_status=http_status, request_id=request_id, region="",
+            vector_dims=None, prompt_chars=len(prompt),
+            prompt=" ".join(prompt.split()), error=error,
+        )
+
+
 class AirsScanner:
     """Hits the Prisma AIRS synchronous scan API directly (no Azure model call).
 
@@ -182,6 +344,17 @@ class AirsScanner:
                 "Accept": "application/json",
             },
         )
+
+    def probe(self) -> tuple[bool, str]:
+        try:
+            resp = self._http.post(self._url, json=self._payload("probe", 0, 0))
+            if resp.status_code == 200:
+                return True, "ok"
+            return False, f"HTTP {resp.status_code}: {resp.text[:200]}"
+        except httpx.TimeoutException:
+            return False, "timeout"
+        except httpx.HTTPError as e:
+            return False, str(e).replace("\n", " ")[:200]
 
     def warmup(self) -> None:
         with contextlib.suppress(Exception):
@@ -437,7 +610,7 @@ def main() -> None:
     output = args.output or f"guardrail_bench_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
     summary_path = os.path.splitext(output)[0] + ".summary.json"
 
-    scanners: list[EmbeddingScanner | AirsScanner] = [
+    scanners: list[EmbeddingScanner | ContentShieldScanner | TextAnalyzeScanner | AirsScanner] = [
         EmbeddingScanner("default", cfg["AZURE_AI_ENDPOINT"] or "", azure_auth,
                          cfg["DEPLOYMENT_DEFAULT"] or "", args.timeout),
         EmbeddingScanner("strict",  cfg["AZURE_AI_ENDPOINT"] or "", azure_auth,
@@ -445,6 +618,33 @@ def main() -> None:
         EmbeddingScanner("prisma",  cfg["AZURE_AI_ENDPOINT"] or "", azure_auth,
                          cfg["DEPLOYMENT_PRISMA"] or "",  args.timeout),
     ]
+
+    cs_endpoint = os.getenv("AZURE_CONTENT_SAFETY_ENDPOINT")
+    if cs_endpoint:
+        cs_api_key = os.getenv("AZURE_AI_API_KEY")
+        cs_token_provider: Any | None = None
+        if not cs_api_key:
+            try:
+                from azure.identity import DefaultAzureCredential, get_bearer_token_provider
+                # Separate credential instances so each scanner has its own token cache.
+                cs_token_provider = get_bearer_token_provider(
+                    DefaultAzureCredential(), "https://cognitiveservices.azure.com/.default"
+                )
+                cs_token_provider2 = get_bearer_token_provider(
+                    DefaultAzureCredential(), "https://cognitiveservices.azure.com/.default"
+                )
+            except ImportError:
+                log.warning("azure-identity not installed; content safety legs require AZURE_AI_API_KEY — skipping")
+                cs_endpoint = None
+        else:
+            cs_token_provider2 = None
+        if cs_endpoint:
+            scanners.append(ContentShieldScanner("content", cs_endpoint, cs_api_key, cs_token_provider, args.timeout))
+            scanners.append(TextAnalyzeScanner("security", cs_endpoint, cs_api_key, cs_token_provider2, args.timeout))
+            log.info("Content Safety legs enabled (%s)", cs_endpoint)
+    else:
+        log.info("Content Safety legs disabled — set AZURE_CONTENT_SAFETY_ENDPOINT to enable")
+
     airs_key = os.getenv("PRISMA_AIRS_DIRECT_API_KEY") or os.getenv("PRISMA_AIRS_API_KEY")
     airs_profile = os.getenv("PRISMA_AIRS_DIRECT_PROFILE_NAME") or os.getenv("PRISMA_AIRS_PROFILE_NAME")
     if airs_key and airs_profile:
@@ -458,6 +658,23 @@ def main() -> None:
         log.info("Prisma AIRS direct API enabled (profile: %s)", airs_profile)
     else:
         log.info("Prisma AIRS leg disabled — set PRISMA_AIRS_DIRECT_API_KEY + PRISMA_AIRS_DIRECT_PROFILE_NAME to enable")
+
+    # Pre-flight: probe optional legs (content, security) and drop any that are unreachable.
+    # Required legs (default, strict, prisma) abort on failure.
+    REQUIRED_LEGS = {"default", "strict", "prisma"}
+    live_scanners: list[EmbeddingScanner | ContentShieldScanner | TextAnalyzeScanner | AirsScanner] = []
+    log.info("Pre-flight probe...")
+    for scanner in scanners:
+        ok, msg = scanner.probe()
+        log.info("  %-9s %s", scanner.name, msg)
+        if ok:
+            live_scanners.append(scanner)
+        elif scanner.name in REQUIRED_LEGS:
+            log.error("Required leg %r failed probe: %s — aborting.", scanner.name, msg)
+            sys.exit(1)
+        else:
+            log.warning("Optional leg %r failed probe — skipping.", scanner.name)
+    scanners = live_scanners
 
     names = tuple(s.name for s in scanners)
 

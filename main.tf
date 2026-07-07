@@ -425,3 +425,9 @@ resource "azurerm_role_assignment" "bench_vm_ai_user" {
   role_definition_name = "Cognitive Services OpenAI User"
   principal_id         = azurerm_linux_virtual_machine.bench_vm.identity[0].principal_id
 }
+
+resource "azurerm_role_assignment" "bench_vm_cs_user" {
+  scope                = azurerm_cognitive_account.ai_services.id
+  role_definition_name = "Cognitive Services User"
+  principal_id         = azurerm_linux_virtual_machine.bench_vm.identity[0].principal_id
+}
