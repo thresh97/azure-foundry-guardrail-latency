@@ -7,14 +7,14 @@ then emits a console summary + JSON with percentiles, pairwise deltas, and
 fastest-endpoint win rate.
 
 Azure Foundry postures (always active) — Responses API via /openai/v1:
-  default   azure-default  (Microsoft.Default RAI — system-managed)
-  strict    azure-strict   (custom low-severity content filters, prompt + completion)
-  prisma    prisma-airs    (Azure RAI pass-through + Prisma AIRS via Foundry integration)
+  default              azure-default  (Microsoft.Default RAI — system-managed)
+  strict               azure-strict   (custom low-severity content filters, prompt + completion)
+  airs-api-via-foundry prisma-airs    (Azure RAI pass-through + Prisma AIRS via Foundry integration)
 
 Optional standalone scanner legs (scan-only, no model generation):
-  shield    Azure AI Content Safety — text:shieldPrompt (jailbreak / prompt injection)
-  analyze   Azure AI Content Safety — text:analyze      (hate, violence, self-harm, sexual)
-  airs      Prisma AIRS             — POST /v1/scan/sync/request
+  shield          Azure AI Content Safety — text:shieldPrompt (jailbreak / prompt injection)
+  analyze         Azure AI Content Safety — text:analyze      (hate, violence, self-harm, sexual)
+  airs-api        Prisma AIRS             — POST /v1/scan/sync/request (direct)
 
 Required env / .env:
   AZURE_AI_ENDPOINT        https://<subdomain>.services.ai.azure.com/openai/v1
@@ -611,11 +611,11 @@ def main() -> None:
     summary_path = os.path.splitext(output)[0] + ".summary.json"
 
     scanners: list[EmbeddingScanner | ContentShieldScanner | TextAnalyzeScanner | AirsScanner] = [
-        EmbeddingScanner("default", cfg["AZURE_AI_ENDPOINT"] or "", azure_auth,
+        EmbeddingScanner("default",              cfg["AZURE_AI_ENDPOINT"] or "", azure_auth,
                          cfg["DEPLOYMENT_DEFAULT"] or "", args.timeout),
-        EmbeddingScanner("strict",  cfg["AZURE_AI_ENDPOINT"] or "", azure_auth,
+        EmbeddingScanner("strict",               cfg["AZURE_AI_ENDPOINT"] or "", azure_auth,
                          cfg["DEPLOYMENT_STRICT"] or "",  args.timeout),
-        EmbeddingScanner("prisma",  cfg["AZURE_AI_ENDPOINT"] or "", azure_auth,
+        EmbeddingScanner("airs-api-via-foundry", cfg["AZURE_AI_ENDPOINT"] or "", azure_auth,
                          cfg["DEPLOYMENT_PRISMA"] or "",  args.timeout),
     ]
 
@@ -649,7 +649,7 @@ def main() -> None:
     airs_profile = os.getenv("PRISMA_AIRS_DIRECT_PROFILE_NAME") or os.getenv("PRISMA_AIRS_PROFILE_NAME")
     if airs_key and airs_profile:
         scanners.append(AirsScanner(
-            "airs",
+            "airs-api",
             os.getenv("PRISMA_AIRS_ENDPOINT", AIRS_DEFAULT_ENDPOINT),
             airs_key,
             airs_profile,
@@ -661,7 +661,7 @@ def main() -> None:
 
     # Pre-flight: probe optional legs (content, security) and drop any that are unreachable.
     # Required legs (default, strict, prisma) abort on failure.
-    REQUIRED_LEGS = {"default", "strict", "prisma"}
+    REQUIRED_LEGS = {"default", "strict", "airs-api-via-foundry"}
     live_scanners: list[EmbeddingScanner | ContentShieldScanner | TextAnalyzeScanner | AirsScanner] = []
     log.info("Pre-flight probe...")
     for scanner in scanners:

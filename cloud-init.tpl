@@ -13,9 +13,9 @@ write_files:
       DEPLOYMENT_STRICT=${deployment_strict}
       DEPLOYMENT_PRISMA=${deployment_prisma}
       PRISMA_AIRS_API_KEY=${prisma_airs_api_key}
-      PRISMA_AIRS_PROFILE_NAME=ai-foundry-prisma-benchmark
+      PRISMA_AIRS_PROFILE_NAME=airs-api-via-foundry
       PRISMA_AIRS_DIRECT_API_KEY=${prisma_airs_direct_api_key}
-      PRISMA_AIRS_DIRECT_PROFILE_NAME=bench-direct-api
+      PRISMA_AIRS_DIRECT_PROFILE_NAME=airs-api
 
 runcmd:
   - git clone https://github.com/thresh97/azure-foundry-guardrail-latency /home/azureuser/bench
