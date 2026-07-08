@@ -12,8 +12,8 @@ Azure Foundry postures (always active) — Responses API via /openai/v1:
   prisma    prisma-airs    (Azure RAI pass-through + Prisma AIRS via Foundry integration)
 
 Optional standalone scanner legs (scan-only, no model generation):
-  content   Azure AI Content Safety — shieldPrompt (jailbreak / prompt injection)
-  security  Azure AI Content Safety — text:analyze  (hate, violence, self-harm, sexual)
+  shield    Azure AI Content Safety — text:shieldPrompt (jailbreak / prompt injection)
+  analyze   Azure AI Content Safety — text:analyze      (hate, violence, self-harm, sexual)
   airs      Prisma AIRS             — POST /v1/scan/sync/request
 
 Required env / .env:
@@ -70,7 +70,7 @@ class ScanResult:
     timestamp: str
     prompt_index: int
     repeat: int
-    endpoint: str       # default | strict | prisma
+    endpoint: str       # default | strict | prisma | shield | analyze | airs
     latency_ms: float   # full client-side round trip
     server_ms: float | None  # openai-processing-ms header
     status: str         # SUCCESS | BLOCKED | HTTP_<code> | TIMEOUT | CONN_ERROR
@@ -639,11 +639,11 @@ def main() -> None:
         else:
             cs_token_provider2 = None
         if cs_endpoint:
-            scanners.append(ContentShieldScanner("content", cs_endpoint, cs_api_key, cs_token_provider, args.timeout))
-            scanners.append(TextAnalyzeScanner("security", cs_endpoint, cs_api_key, cs_token_provider2, args.timeout))
-            log.info("Content Safety legs enabled (%s)", cs_endpoint)
+            scanners.append(ContentShieldScanner("shield", cs_endpoint, cs_api_key, cs_token_provider, args.timeout))
+            scanners.append(TextAnalyzeScanner("analyze", cs_endpoint, cs_api_key, cs_token_provider2, args.timeout))
+            log.info("Content Safety legs enabled (shield=shieldPrompt, analyze=text:analyze) (%s)", cs_endpoint)
     else:
-        log.info("Content Safety legs disabled — set AZURE_CONTENT_SAFETY_ENDPOINT to enable")
+        log.info("Content Safety legs disabled — set AZURE_CONTENT_SAFETY_ENDPOINT to enable (shield + analyze)")
 
     airs_key = os.getenv("PRISMA_AIRS_DIRECT_API_KEY") or os.getenv("PRISMA_AIRS_API_KEY")
     airs_profile = os.getenv("PRISMA_AIRS_DIRECT_PROFILE_NAME") or os.getenv("PRISMA_AIRS_PROFILE_NAME")
