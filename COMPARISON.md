@@ -2,6 +2,8 @@
 
 > **Status: NEEDS FURTHER VALIDATION**
 > This comparison was generated via automated deep research (96 agents, 14 sources, 25 adversarially verified claims) and manual review. Known gaps and corrections are noted inline. Do not treat as complete or authoritative without hands-on verification against current product documentation.
+>
+> **Bench data as of 2026-07-08** — 20 prompts (10 benign, 10 adversarial), 3 repeats, seed 42, run from West US VM against West US endpoints. Leg names: `airs-api` (direct scan API, profile `airs-api`), `airs-api-via-foundry` (Azure AI Foundry external guardrail, profile `airs-api-via-foundry`). Both profiles are configuration-identical.
 
 ---
 
@@ -62,6 +64,24 @@
 
 ---
 
+## Bench-observed integration behaviour (2026-07-08)
+
+| Metric | airs-api (direct) | airs-api-via-foundry (Foundry) |
+|---|---|---|
+| Block rate (adversarial prompts) | **50% — 30/60, deterministic** | **38–45% — 23–27/60, non-deterministic** |
+| Mean latency | ~250ms (scan-only, no model) | ~1500ms (includes model call for allowed prompts) |
+| Latency vs default/strict | 7× faster | ~15% faster (blocked requests short-circuit model) |
+| Profile | `airs-api` | `airs-api-via-foundry` |
+| API key / app | `azure-airs-api` | `azure-airs-api-via-foundry` |
+
+**Key findings:**
+- Earlier bench showed only 15% blocks via Foundry — root cause was the AIRS external guardrail had not been applied to the `mharms-proj-prisma-wdx` project. After correct wiring, block rate rose to 38–45%.
+- `airs-api` blocks all 10 adversarial prompts every run. `airs-api-via-foundry` consistently misses ~3, with variance of ±1 across runs — suggesting those prompts sit near the detection boundary and the Foundry routing path (Azure APIM → RAI layer → AIRS → model) introduces enough variance to affect verdicts.
+- Both profiles are configuration-identical (confirmed via `airs runtime profiles get`); the residual gap is architectural, not a tuning difference.
+- `airs-api-via-foundry` latency is lower than `default`/`strict` because AIRS blocks before model generation for ~45% of inputs.
+
+---
+
 ## Known gaps / open questions
 
 1. **Custom topics vs. custom categories implementation delta** — AIRS custom topics appear prompt-defined; Azure offers ML-trained (standard) and LLM-backed (rapid) flavors. Needs side-by-side comparison of configuration model, latency, and supported content types.
@@ -69,4 +89,4 @@
 3. **AIRS prompt injection subtype taxonomy** — AIRS has prompt injection detection but specific subtypes were not verified. Azure Prompt Shields has 14 named subtypes (4 direct, 10 indirect). Needs AIRS doc review to determine if the coverage gap is real or a documentation depth difference.
 4. **AIRS default posture risk** — both Moderate and High toxic content tiers default to **Allow**. Azure content filters default to enabled. Verify deployed AIRS profile actions are set to Block.
 5. **Azure Task Adherence (preview)** — limited regional availability; 100K character limit; behavior in production may differ from documentation.
-6. **Foundry integration block rate discrepancy** — bench shows `airs` direct blocks 50% vs. `prisma` (Foundry-integrated) blocks 15% despite identical profile configurations. Hypothesis: Azure Foundry AIRS integration may run in observe/monitor mode rather than inline block. Needs verification in Azure AI Foundry portal guardrail settings.
+6. **Residual 3-prompt gap in Foundry integration** — `airs-api-via-foundry` consistently misses ~3 adversarial prompts that `airs-api` catches. Next step: pull per-prompt block/allow breakdown from the bench CSV to identify which prompts slip through and whether it's a detection category, severity threshold, or latency/timeout issue in the Foundry path.
